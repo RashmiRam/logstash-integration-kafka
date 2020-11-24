@@ -220,13 +220,16 @@ class LogStash::Inputs::Kafka < LogStash::Inputs::Base
   #   `offset`: The offset from the partition this message is associated with
   #   `key`: A ByteBuffer containing the message key
   #   `timestamp`: The timestamp of this message
-  config :decorate_events, :validate => :boolean, :default => false
+  config :decorate_events, :validate => %w(none basic extended false true), :default => "none"
 
 
   public
   def register
     @runner_threads = []
-  end # def register
+    @decorate_events_level = extract_decorate_events_level(@decorate_events)
+  end
+
+  attr_reader :decorate_events_level
 
   public
   def run(logstash_queue)
@@ -263,15 +266,7 @@ class LogStash::Inputs::Kafka < LogStash::Inputs::Base
           next unless records.count > 0
           for record in records do
             codec_instance.decode(record.value.to_s) do |event|
-              decorate(event)
-              if @decorate_events
-                event.set("[@metadata][kafka][topic]", record.topic)
-                event.set("[@metadata][kafka][consumer_group]", @group_id)
-                event.set("[@metadata][kafka][partition]", record.partition)
-                event.set("[@metadata][kafka][offset]", record.offset)
-                event.set("[@metadata][kafka][key]", record.key)
-                event.set("[@metadata][kafka][timestamp]", record.timestamp)
-              end
+              decorate(event, record)
               logstash_queue << event
             end
           end
@@ -286,6 +281,26 @@ class LogStash::Inputs::Kafka < LogStash::Inputs::Base
         consumer.close
       end
     end
+  end
+
+  def decorate(event, record)
+    super(event)
+
+    if decorate_events_level.include?(:headers)
+      for header in record.headers do
+        event.set("[@metadata][kafka][headers]["+header.key+"]", header.value.to_s)
+      end
+    end
+
+    if decorate_events_level.include?(:properties)
+      event.set("[@metadata][kafka][topic]", record.topic)
+      event.set("[@metadata][kafka][consumer_group]", @group_id)
+      event.set("[@metadata][kafka][partition]", record.partition)
+      event.set("[@metadata][kafka][offset]", record.offset)
+      event.set("[@metadata][kafka][key]", record.key)
+      event.set("[@metadata][kafka][timestamp]", record.timestamp)
+    end
+    nil
   end
 
   private
@@ -385,4 +400,26 @@ class LogStash::Inputs::Kafka < LogStash::Inputs::Base
     props.put("sasl.kerberos.service.name",sasl_kerberos_service_name) unless sasl_kerberos_service_name.nil?
     props.put("sasl.jaas.config", sasl_jaas_config) unless sasl_jaas_config.nil?
   end
+
+  DECORATE_EVENTS_NONE     = Set[].freeze
+  DECORATE_EVENTS_BASIC    = Set[:headers,:properties].freeze
+  DECORATE_EVENTS_EXTENDED = Set[:headers,:properties,:payload].freeze
+  DECORATE_EVENTS_DEPRECATION_MAP = { 'true' => 'basic', 'false' => 'none' }
+
+  def extract_decorate_events_level(decorate_events_setting)
+    decorate_events = decorate_events_setting
+
+    if DECORATE_EVENTS_DEPRECATION_MAP.include?(decorate_events)
+      canonical_value = DECORATE_EVENTS_DEPRECATION_MAP[decorate_events]
+      logger.warn("Deprecated value `#{decorate_events_setting}` for `decorate_events` option; use `#{canonical_value}` instead.")
+      decorate_events = canonical_value
+    end
+
+    case decorate_events
+    when 'none'     then DECORATE_EVENTS_NONE
+    when 'basic'    then DECORATE_EVENTS_BASIC
+    when 'extended' then DECORATE_EVENTS_EXTENDED
+    end
+  end
+
 end #class LogStash::Inputs::Kafka
